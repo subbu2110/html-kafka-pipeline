@@ -1,0 +1,45 @@
+Problem Statement 
+You are given a URL that  has some data in the form of a table. Feel free to pick any URL for your testing and relevant table to extract. 
+Your task is to build a system that: 
+Makes an API call to the given URL 
+Parses the HTML table 
+Automatically infers the table schema (column names, data types) 
+Streams the extracted records through Kafka, MQ 
+Consumes the Kafka stream and inserts the data into a relational database 
+The system should be robust, extensible, and production-oriented. 
+ 
+Functional Requirements 
+1. Data Fetching 
+Fetch data from a configurable URL. Feel free to pick any URL for your testing and relevant table to extract. 
+Handle network failures, retries, and timeouts 
+Assume the response contains at least one HTML table 
+2. Table Parsing & Schema Inference 
+Extract: 
+Column names 
+Rows and values 
+Infer data types such as: 
+INT 
+FLOAT 
+VARCHAR/TEXT 
+DATE/TIMESTAMP (bonus) 
+Schema should be inferred before inserting data 
+3. Kafka Integration 
+Use Kafka to decouple ingestion from persistence 
+Design: 
+A Producer that publishes extracted rows 
+A Consumer that reads from Kafka and writes to the database 
+Ensure: 
+Idempotent writes or reasonable guarantees 
+Proper serialization format (JSON, Avro, or Protobuf) 
+4. Database Layer 
+Use MySQL (preferred) or Postgres 
+Dynamically create tables based on inferred schema 
+Insert records efficiently (batch inserts preferred) 
+Handle schema mismatches gracefully 
+ 
+Non-Functional Requirements 
+Written in GoLang 
+Clean, modular, idiomatic Go code 
+Proper error handling and logging 
+Configuration via environment variables or config files 
+Kafka and DB credentials must not be hard-coded 

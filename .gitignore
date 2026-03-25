@@ -1,0 +1,12 @@
+# Environment — contains credentials, never commit
+.env
+
+# Build output
+bin/
+
+# Go test cache
+*.test
+*.out
+
+# OS
+.DS_Store
