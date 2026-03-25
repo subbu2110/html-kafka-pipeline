@@ -4,7 +4,7 @@ package parser
 import (
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"strings"
 
 	"golang.org/x/net/html"
@@ -65,13 +65,11 @@ func selectTable(tables []*html.Node, opts ParseOptions) *html.Node {
 				return t
 			}
 		}
-		log.Printf("[parser] TABLE_CSS_CLASS %q not found in %d table(s); falling back to TABLE_INDEX %d",
-			opts.CSSClass, len(tables), opts.TableIndex)
+		slog.Warn("CSS class not found, falling back to index", "class", opts.CSSClass, "tables", len(tables), "index", opts.TableIndex)
 	}
 	idx := opts.TableIndex
 	if idx < 0 || idx >= len(tables) {
-		log.Printf("[parser] TABLE_INDEX %d out of range (%d tables found); using table 0",
-			opts.TableIndex, len(tables))
+		slog.Warn("table index out of range, using 0", "index", opts.TableIndex, "tables", len(tables))
 		idx = 0
 	}
 	return tables[idx]

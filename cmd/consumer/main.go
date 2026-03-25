@@ -3,7 +3,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -17,6 +17,8 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
 	_ = godotenv.Load()
 	cfg := config.Load()
 
@@ -26,7 +28,8 @@ func main() {
 	// ── Database ─────────────────────────────────────────────────────────────
 	database, err := dbpkg.New(cfg.DBDriver, cfg.DBDSN)
 	if err != nil {
-		log.Fatalf("[consumer] db init: %v", err)
+		slog.Error("db init failed", "err", err)
+		os.Exit(1)
 	}
 	defer database.Close()
 
@@ -35,8 +38,8 @@ func main() {
 	defer consumer.Close()
 
 	flushInterval := time.Duration(cfg.BatchFlushMs) * time.Millisecond
-	log.Printf("[consumer] started — topic=%s group=%s batchSize=%d flushInterval=%s",
-		cfg.KafkaTopic, cfg.KafkaGroupID, cfg.BatchSize, flushInterval)
+	slog.Info("consumer started", "topic", cfg.KafkaTopic, "group", cfg.KafkaGroupID,
+		"batchSize", cfg.BatchSize, "flushInterval", flushInterval)
 
 	totalInserted := 0
 
@@ -47,7 +50,7 @@ func main() {
 			if ctx.Err() != nil {
 				break
 			}
-			log.Printf("[consumer] fetch error: %v", err)
+			slog.Warn("fetch error", "err", err)
 			continue
 		}
 		if len(batch) == 0 {
@@ -65,7 +68,7 @@ func main() {
 			schemaInfo := msgs[0].Message.Schema
 
 			if err := database.EnsureTable(schemaInfo); err != nil {
-				log.Printf("[consumer] ensure table %q: %v", tableName, err)
+				slog.Error("ensure table failed", "table", tableName, "err", err)
 				// Do not skip the commit — re-delivery won't help a DDL failure
 				// (e.g. insufficient DB privileges). Log and move on.
 			}
@@ -77,27 +80,22 @@ func main() {
 
 			n, err := database.BatchInsert(tableName, schemaInfo.Columns, records)
 			if err != nil {
-				log.Printf("[consumer] batch insert %q: %v", tableName, err)
-				// Row-level errors are already handled inside BatchInsert.
-				// A total insert failure (e.g. lost DB connection) is logged here;
-				// the offset is still committed because INSERT IGNORE guarantees
-				// that any successfully inserted rows won't be duplicated on retry.
+				slog.Error("batch insert failed", "table", tableName, "err", err)
 			} else {
 				totalInserted += n
-				log.Printf("[consumer] inserted %d/%d rows into %q (total: %d)",
-					n, len(records), tableName, totalInserted)
+				slog.Info("batch inserted", "table", tableName, "inserted", n, "batch", len(records), "total", totalInserted)
 			}
 		}
 
 		// ── Always commit offsets after processing ───────────────────────────
-		// Idempotency is guaranteed by _row_hash + INSERT IGNORE, so committing
-		// even after a partial failure is safe and prevents unbounded re-delivery.
+		// Idempotency is guaranteed by _row_hash + INSERT IGNORE / ON CONFLICT,
+		// so committing even after a partial failure is safe.
 		if err := consumer.Commit(ctx, batch); err != nil {
-			log.Printf("[consumer] commit error: %v", err)
+			slog.Warn("offset commit failed", "err", err)
 		}
 	}
 
-	log.Printf("[consumer] shut down — total rows inserted: %d", totalInserted)
+	slog.Info("consumer shut down", "totalInserted", totalInserted)
 }
 
 // groupByTable splits a batch of ConsumedMessages by their target table name.

@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	kafkago "github.com/segmentio/kafka-go"
@@ -64,7 +64,7 @@ func (c *Consumer) FetchBatch(ctx context.Context, batchSize int, flushInterval 
 
 		var m models.Message
 		if err := json.Unmarshal(msg.Value, &m); err != nil {
-			log.Printf("[consumer] skip malformed message offset=%d: %v", msg.Offset, err)
+			slog.Warn("skipping malformed message", "offset", msg.Offset, "err", err)
 			// Commit the bad message so we don't re-process it forever.
 			_ = c.reader.CommitMessages(ctx, msg)
 			continue

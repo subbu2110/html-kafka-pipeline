@@ -6,7 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -40,7 +40,7 @@ func New(driver, dsn string) (*DB, error) {
 	if driver == "postgres" {
 		d = schema.DialectPostgres
 	}
-	log.Printf("[db] connected to %s", driver)
+	slog.Info("db connected", "driver", driver)
 	return &DB{conn: conn, dialect: d, createdTables: make(map[string]struct{})}, nil
 }
 
@@ -70,7 +70,7 @@ func (d *DB) EnsureTable(si models.SchemaInfo) error {
 	}
 
 	d.createdTables[si.TableName] = struct{}{}
-	log.Printf("[db] table %q ready", si.TableName)
+	slog.Info("table ready", "table", si.TableName)
 	return nil
 }
 
@@ -148,12 +148,12 @@ func (d *DB) BatchInsert(tableName string, columns []models.ColumnInfo, records 
 		res, err := stmt.Exec(args...)
 		if err != nil {
 			// Log and continue — one bad row must not abort the whole batch.
-			log.Printf("[db] row insert error (skipping): %v", err)
+			slog.Warn("row insert error, skipping", "err", err)
 			continue
 		}
 		n, err := res.RowsAffected()
 		if err != nil {
-			log.Printf("[db] RowsAffected error: %v", err)
+			slog.Warn("RowsAffected error", "err", err)
 		}
 		inserted += int(n)
 	}

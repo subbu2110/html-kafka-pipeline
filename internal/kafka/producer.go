@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	kafkago "github.com/segmentio/kafka-go"
@@ -53,7 +53,7 @@ func (p *Producer) Publish(ctx context.Context, msgs []models.Message) error {
 		return fmt.Errorf("write messages to kafka: %w", err)
 	}
 
-	log.Printf("[producer] published %d messages", len(msgs))
+	slog.Info("published to kafka", "count", len(msgs))
 	return nil
 }
 

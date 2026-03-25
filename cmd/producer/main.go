@@ -4,7 +4,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -20,6 +20,8 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
 	// Load .env if present; ignore error when the file doesn't exist.
 	_ = godotenv.Load()
 	cfg := config.Load()
@@ -28,11 +30,12 @@ func main() {
 	defer stop()
 
 	// ── 1. Fetch HTML ────────────────────────────────────────────────────────
-	log.Printf("[producer] fetching %s", cfg.URL)
+	slog.Info("fetching URL", "url", cfg.URL)
 	f := fetcher.New(cfg.FetchTimeout, cfg.FetchRetries)
 	body, err := f.Fetch(cfg.URL)
 	if err != nil {
-		log.Fatalf("[producer] fetch error: %v", err)
+		slog.Error("fetch failed", "err", err)
+		os.Exit(1)
 	}
 	defer body.Close()
 
@@ -42,18 +45,20 @@ func main() {
 		CSSClass:   cfg.TableCSSClass,
 	})
 	if err != nil {
-		log.Fatalf("[producer] parse error: %v", err)
+		slog.Error("parse failed", "err", err)
+		os.Exit(1)
 	}
-	log.Printf("[producer] parsed table: %d columns, %d rows", len(table.Headers), len(table.Rows))
+	slog.Info("parsed table", "columns", len(table.Headers), "rows", len(table.Rows))
 
 	// ── 3. Infer schema ──────────────────────────────────────────────────────
 	sc := schema.Infer(cfg.TableName, table.Headers, table.Rows)
 	if len(sc.Columns) == 0 {
-		log.Fatalf("[producer] table %q has no columns — check TABLE_INDEX / TABLE_CSS_CLASS config", sc.TableName)
+		slog.Error("table has no columns — check TABLE_INDEX / TABLE_CSS_CLASS", "table", sc.TableName)
+		os.Exit(1)
 	}
-	log.Printf("[producer] inferred schema for table %q:", sc.TableName)
+	slog.Info("inferred schema", "table", sc.TableName, "columns", len(sc.Columns))
 	for _, col := range sc.Columns {
-		log.Printf("  %-30s %s", col.Name, col.Type)
+		slog.Debug("column", "name", col.Name, "type", col.Type)
 	}
 
 	// Build the SchemaInfo that will be embedded in every Kafka message.
@@ -87,7 +92,7 @@ func main() {
 	producer := kafkapkg.NewProducer(cfg.KafkaBrokers, cfg.KafkaTopic)
 	defer func() {
 		if err := producer.Close(); err != nil {
-			log.Printf("[producer] close error: %v", err)
+			slog.Warn("producer close error", "err", err)
 		}
 	}()
 
@@ -98,10 +103,11 @@ func main() {
 			end = len(messages)
 		}
 		if err := producer.Publish(ctx, messages[i:end]); err != nil {
-			log.Fatalf("[producer] publish error: %v", err)
+			slog.Error("publish failed", "err", err)
+			os.Exit(1)
 		}
 		total += end - i
 	}
 
-	log.Printf("[producer] done — published %d/%d records to topic %q", total, len(messages), cfg.KafkaTopic)
+	slog.Info("producer done", "published", total, "total", len(messages), "topic", cfg.KafkaTopic)
 }

@@ -4,7 +4,7 @@ package fetcher
 import (
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"math"
 	"net/http"
 	"time"
@@ -36,7 +36,7 @@ func (f *Fetcher) Fetch(url string) (io.ReadCloser, error) {
 	for attempt := 0; attempt <= f.retries; attempt++ {
 		if attempt > 0 {
 			wait := time.Duration(math.Pow(2, float64(attempt))) * time.Second
-			log.Printf("fetch retry %d/%d in %s: %v", attempt, f.retries, wait, lastErr)
+			slog.Warn("fetch retry", "attempt", attempt, "of", f.retries, "wait", wait, "err", lastErr)
 			time.Sleep(wait)
 		}
 
