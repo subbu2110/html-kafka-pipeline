@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// ColumnType is a MySQL column type string.
+// ColumnType is a SQL column type string (compatible with MySQL and Postgres).
 type ColumnType string
 
 const (
@@ -33,7 +33,17 @@ type Schema struct {
 	Columns   []Column
 }
 
-// dateFormats lists the formats tried during date inference (order matters).
+// timestampFormats lists formats that include a time component → TIMESTAMP.
+var timestampFormats = []string{
+	"2006-01-02 15:04:05",
+	"2006-01-02T15:04:05Z",
+	"2006-01-02T15:04:05",
+	"2006-01-02T15:04:05-07:00",
+	"01/02/2006 15:04:05",
+	"Jan 2, 2006 15:04:05",
+}
+
+// dateFormats lists date-only formats → DATE.
 // "2006" (year-only) is intentionally excluded — a bare 4-digit year is more
 // naturally a BIGINT and the format is too broad (every integer 1000–9999 matches).
 var dateFormats = []string{
@@ -100,7 +110,7 @@ func Infer(tableName string, headers []string, rows [][]string) *Schema {
 }
 
 // coerce narrows the current inferred type when val is incompatible with it.
-// The type hierarchy is: BIGINT → DOUBLE → DATE → VARCHAR → TEXT
+// The type hierarchy is: BIGINT → DOUBLE → TIMESTAMP → DATE → VARCHAR → TEXT
 func coerce(current ColumnType, val string) ColumnType {
 	switch current {
 	case TypeBigInt:
@@ -111,6 +121,11 @@ func coerce(current ColumnType, val string) ColumnType {
 	case TypeDouble:
 		if isFloat(val) {
 			return TypeDouble
+		}
+		fallthrough
+	case TypeTimestamp:
+		if isTimestamp(val) {
+			return TypeTimestamp
 		}
 		fallthrough
 	case TypeDate:
@@ -155,6 +170,15 @@ func isFloat(s string) bool {
 	s = strings.TrimPrefix(s, "+")
 	_, err := strconv.ParseFloat(s, 64)
 	return err == nil
+}
+
+func isTimestamp(s string) bool {
+	for _, f := range timestampFormats {
+		if _, err := time.Parse(f, s); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func isDate(s string) bool {
@@ -202,19 +226,48 @@ func SanitiseName(s string) string {
 	return s
 }
 
+// Dialect selects database-specific SQL syntax.
+type Dialect string
+
+const (
+	DialectMySQL    Dialect = "mysql"
+	DialectPostgres Dialect = "postgres"
+)
+
+// QuoteIdent wraps an identifier in the dialect-appropriate quoting character.
+func (d Dialect) QuoteIdent(name string) string {
+	if d == DialectPostgres {
+		return `"` + name + `"`
+	}
+	return "`" + name + "`"
+}
+
+// quote is an unexported alias used within the package.
+func (d Dialect) quote(name string) string { return d.QuoteIdent(name) }
+
 // CreateTableSQL returns a CREATE TABLE IF NOT EXISTS statement for the schema.
 // It adds _id (PK) and _row_hash (UNIQUE) columns for idempotent inserts.
-func (s *Schema) CreateTableSQL() string {
+// Pass DialectMySQL or DialectPostgres to get the appropriate DDL.
+func (s *Schema) CreateTableSQL(dialect Dialect) string {
+	q := dialect.quote
+
+	var idCol string
+	if dialect == DialectPostgres {
+		idCol = fmt.Sprintf("%s BIGSERIAL PRIMARY KEY", q("_id"))
+	} else {
+		idCol = fmt.Sprintf("%s BIGINT AUTO_INCREMENT PRIMARY KEY", q("_id"))
+	}
+
 	parts := []string{
-		"`_id` BIGINT AUTO_INCREMENT PRIMARY KEY",
-		"`_row_hash` VARCHAR(64) NOT NULL UNIQUE",
+		idCol,
+		fmt.Sprintf("%s VARCHAR(64) NOT NULL UNIQUE", q("_row_hash")),
 	}
 	for _, col := range s.Columns {
-		parts = append(parts, fmt.Sprintf("`%s` %s", col.Name, col.Type))
+		parts = append(parts, fmt.Sprintf("%s %s", q(col.Name), col.Type))
 	}
 	return fmt.Sprintf(
-		"CREATE TABLE IF NOT EXISTS `%s` (\n  %s\n)",
-		s.TableName,
+		"CREATE TABLE IF NOT EXISTS %s (\n  %s\n)",
+		q(s.TableName),
 		strings.Join(parts, ",\n  "),
 	)
 }

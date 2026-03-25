@@ -122,7 +122,7 @@ func TestPipeline_LiveFetch(t *testing.T) {
 			}
 
 			// Validate CREATE TABLE DDL.
-			ddl := sc.CreateTableSQL()
+			ddl := sc.CreateTableSQL(schema.DialectMySQL)
 			for _, must := range []string{
 				"CREATE TABLE IF NOT EXISTS",
 				"`_id` BIGINT AUTO_INCREMENT PRIMARY KEY",

@@ -172,7 +172,7 @@ func TestCreateTableSQL(t *testing.T) {
 	headers := []string{"country", "population"}
 	rows := [][]string{{"India", "1400000000"}}
 	sc := Infer("countries", headers, rows)
-	ddl := sc.CreateTableSQL()
+	ddl := sc.CreateTableSQL(DialectMySQL)
 
 	for _, must := range []string{
 		"CREATE TABLE IF NOT EXISTS",
@@ -184,6 +184,45 @@ func TestCreateTableSQL(t *testing.T) {
 	} {
 		if !strings.Contains(ddl, must) {
 			t.Errorf("DDL missing %q\nGot:\n%s", must, ddl)
+		}
+	}
+}
+
+func TestInfer_timestampColumns(t *testing.T) {
+	headers := []string{"created_at", "date_only"}
+	rows := [][]string{
+		{"2024-01-15 09:30:00", "2024-01-15"},
+		{"2024-02-20 14:45:00", "2024-02-20"},
+	}
+	sc := Infer("events", headers, rows)
+	colMap := map[string]ColumnType{}
+	for _, col := range sc.Columns {
+		colMap[col.Name] = col.Type
+	}
+	if colMap["created_at"] != TypeTimestamp {
+		t.Errorf("created_at: got %q, want TIMESTAMP", colMap["created_at"])
+	}
+	if colMap["date_only"] != TypeDate {
+		t.Errorf("date_only: got %q, want DATE", colMap["date_only"])
+	}
+}
+
+func TestCreateTableSQL_Postgres(t *testing.T) {
+	headers := []string{"country", "population"}
+	rows := [][]string{{"India", "1400000000"}}
+	sc := Infer("countries", headers, rows)
+	ddl := sc.CreateTableSQL(DialectPostgres)
+
+	for _, must := range []string{
+		"CREATE TABLE IF NOT EXISTS",
+		`"countries"`,
+		`"_id" BIGSERIAL PRIMARY KEY`,
+		`"_row_hash" VARCHAR(64)`,
+		`"country"`,
+		`"population"`,
+	} {
+		if !strings.Contains(ddl, must) {
+			t.Errorf("Postgres DDL missing %q\nGot:\n%s", must, ddl)
 		}
 	}
 }

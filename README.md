@@ -1,6 +1,6 @@
 # HTML → Kafka → MySQL Pipeline
 
-A production-oriented Go service that fetches an HTML table from any URL, infers its schema, streams every row through Kafka, and persists the data into MySQL — all driven by configuration with no code changes required.
+A Go service that scrapes an HTML table from any URL, infers its schema automatically, streams every row through Kafka, and writes the data into MySQL (or Postgres). Everything is configured via environment variables — no code changes needed to point it at a different page or database.
 
 ---
 
@@ -16,16 +16,16 @@ Target URL
                                                       │
                                                Kafka Consumer
                                                       │
-                                                   MySQL
+                                              MySQL / Postgres
                                           (dynamic DDL + batch insert)
 ```
 
 **Flow:**
-1. **Fetcher** — HTTP GET with exponential-backoff retry, 50 MiB response cap
-2. **Parser** — extracts headers and rows from the selected `<table>`, handling `colspan` and `rowspan`
-3. **Schema inference** — assigns the most specific SQL type per column (`BIGINT → DOUBLE → DATE → VARCHAR → TEXT`), normalising currency symbols, commas, `%` suffixes, and footnote markers
-4. **Producer** — serialises each row as a JSON message (schema embedded) and batch-publishes to Kafka
-5. **Consumer** — reads batches, creates the MySQL table on first message, and batch-inserts with `INSERT IGNORE` for idempotency
+1. **Fetcher** — HTTP GET with exponential-backoff retry and a 50 MiB response cap
+2. **Parser** — extracts headers and rows from the target `<table>`, correctly handling `colspan` and `rowspan`
+3. **Schema inference** — picks the most specific SQL type per column (`BIGINT → DOUBLE → TIMESTAMP → DATE → VARCHAR → TEXT`), stripping currency symbols, commas, `%` suffixes, and Wikipedia-style footnote markers before type-checking
+4. **Producer** — serializes each row as a JSON message with the schema embedded, then batch-publishes to Kafka
+5. **Consumer** — reads batches from Kafka, creates the destination table on the first message, and batch-inserts rows with deduplication
 
 ---
 
@@ -33,27 +33,27 @@ Target URL
 
 ```bash
 cp .env.example .env          # fill in DB_DSN (required)
-make up                        # start Kafka + MySQL via Docker Compose
-make consumer                  # terminal A — long-running consumer
-make producer                  # terminal B — one-shot fetch + publish
+make up                       # start Kafka + MySQL via Docker Compose
+make consumer                 # terminal A — long-running consumer
+make producer                 # terminal B — one-shot fetch + publish
 ```
 
 ---
 
 ## Configuration
 
-All values via environment variables or `.env` file. No credentials are hardcoded.
+All values come from environment variables or a `.env` file. No credentials are hardcoded anywhere.
 
 | Variable | Default | Description |
 |---|---|---|
-| `TARGET_URL` | Wikipedia countries by population | Page to fetch |
-| `TABLE_CSS_CLASS` | `wikitable` | Prefer table with this CSS class |
-| `TABLE_INDEX` | `0` | Fallback: 0-based table index |
-| `TABLE_NAME` | `html_data` | MySQL destination table name |
-| `KAFKA_BROKERS` | `localhost:9092` | Comma-separated brokers |
-| `KAFKA_TOPIC` | `html-table-records` | Topic name |
-| `KAFKA_GROUP_ID` | `html-pipeline-consumer` | Consumer group |
-| `DB_DRIVER` | `mysql` | Database driver |
+| `TARGET_URL` | Wikipedia countries by population | Page to scrape |
+| `TABLE_CSS_CLASS` | `wikitable` | Pick the table with this CSS class first |
+| `TABLE_INDEX` | `0` | Fallback: 0-based index if CSS class isn't found |
+| `TABLE_NAME` | `html_data` | Destination table name |
+| `KAFKA_BROKERS` | `localhost:9092` | Comma-separated list of brokers |
+| `KAFKA_TOPIC` | `html-table-records` | Topic to produce/consume |
+| `KAFKA_GROUP_ID` | `html-pipeline-consumer` | Consumer group ID |
+| `DB_DRIVER` | `mysql` | `mysql` or `postgres` |
 | `DB_DSN` | **required** | e.g. `user:pass@tcp(host:3306)/db?parseTime=true` |
 | `FETCH_TIMEOUT_SEC` | `30` | HTTP timeout in seconds |
 | `FETCH_RETRIES` | `3` | Max retry attempts |
@@ -65,19 +65,19 @@ All values via environment variables or `.env` file. No credentials are hardcode
 ## Design decisions
 
 ### Idempotent writes
-Every Kafka message carries a `_row_hash` (SHA-256 of the record JSON). The MySQL table has a `UNIQUE` constraint on this column and inserts use `INSERT IGNORE` — re-running the producer never creates duplicates.
+Each Kafka message includes a `_row_hash` — a SHA-256 of the record's JSON. The destination table has a `UNIQUE` constraint on this column. MySQL uses `INSERT IGNORE`; Postgres uses `ON CONFLICT (_row_hash) DO NOTHING`. Re-running the producer against the same page never creates duplicates.
 
 ### At-least-once delivery
-The consumer uses `FetchMessage` + explicit `CommitMessages` (not auto-commit). Offsets are committed after each successful DB batch. If the process crashes mid-flight, Kafka re-delivers the same messages, which are safely deduplicated by `_row_hash`.
+The consumer calls `FetchMessage` and commits offsets explicitly after each successful DB batch — no auto-commit. If the process crashes mid-batch, Kafka re-delivers those messages and the `_row_hash` deduplication silently handles any rows that were already written.
 
-### Schema embedded in messages
-Each Kafka message carries the full `SchemaInfo` alongside the record. The consumer can create the target MySQL table on first delivery with no separate coordination or schema registry.
+### Schema carried in messages
+Each Kafka message includes the full table schema alongside the row data. This means the consumer can create the destination table on first delivery with no out-of-band coordination or schema registry required.
 
-### Type inference hierarchy
+### Type inference
 ```
-BIGINT → DOUBLE → DATE → VARCHAR(512) → TEXT
+BIGINT → DOUBLE → TIMESTAMP → DATE → VARCHAR(512) → TEXT
 ```
-Each column starts as BIGINT and widens only when a value is incompatible. Currency symbols, thousands separators, and `%` suffixes are stripped before parsing. Duplicate column names after sanitisation are deduped (`change`, `change_2`, …).
+Every column starts as BIGINT and widens only when a value doesn't fit. Currency symbols (`$`, `€`, `£`, `¥`, `₹`), thousands separators, and `%` suffixes are stripped before numeric parsing. Duplicate column names produced by sanitization are disambiguated automatically (`change`, `change_2`, …).
 
 ---
 
@@ -86,13 +86,13 @@ Each column starts as BIGINT and widens only when a value is incompatible. Curre
 ```
 cmd/
   producer/   fetch → parse → infer → publish to Kafka
-  consumer/   read Kafka → ensure table → batch insert to MySQL
+  consumer/   read Kafka → ensure table → batch insert
 internal/
-  fetcher/    HTTP client with retry/backoff
+  fetcher/    HTTP client with retry and backoff
   parser/     HTML table extractor (colspan, rowspan, CSS class selection)
-  schema/     type inference, name sanitisation, DDL generation
+  schema/     type inference, name sanitization, DDL generation
   kafka/      producer and consumer wrappers
-  db/         dynamic DDL, idempotent batch inserts
+  db/         dynamic DDL, idempotent batch inserts (MySQL + Postgres)
   models/     shared Message / SchemaInfo / ColumnInfo types
 config/       environment-variable loader
 ```
@@ -105,7 +105,7 @@ config/       environment-variable loader
 # Unit tests — no network or Docker required
 go test ./internal/... -short
 
-# Full end-to-end tests — fetches real URLs (requires internet)
+# Full integration tests — hits real URLs (requires internet)
 go test ./internal/... -v -timeout 120s
 ```
 
@@ -113,7 +113,7 @@ go test ./internal/... -v -timeout 120s
 
 ## Known limitations
 
-- **JavaScript-rendered tables** — plain HTTP GET only; pages that build tables via JS (Yahoo Finance, Worldometers) are not supported
-- **Multi-row headers** — only the first `<th>` row is used as the header; hierarchical/merged headers are treated as data rows
-- **Schema evolution** — if the source table gains or loses columns between runs, `CREATE TABLE IF NOT EXISTS` keeps the original schema; mismatched rows are logged and skipped
-- **Non-UTF-8 pages** — charset detection is not implemented
+- **JavaScript-rendered tables** — the fetcher does a plain HTTP GET, so pages that build their tables via JavaScript (Yahoo Finance, Worldometers, etc.) won't work
+- **Multi-row headers** — only the first `<th>` row is used as the header; nested or merged header structures are treated as data rows
+- **Schema evolution** — `CREATE TABLE IF NOT EXISTS` preserves the original schema across runs; if the source table gains or loses columns, mismatched rows are logged and skipped rather than migrated
+- **Non-UTF-8 pages** — charset detection is not implemented; pages served in other encodings may produce garbled column names or values

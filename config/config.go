@@ -26,8 +26,8 @@ type Config struct {
 }
 
 // Load reads configuration from environment variables.
-// DB_DSN and KAFKA_BROKERS are required — the application exits immediately
-// if they are absent, so credentials are never hardcoded.
+// DB_DSN is required — the application panics immediately if absent so
+// credentials are never hardcoded. All other variables have safe defaults.
 func Load() *Config {
 	return &Config{
 		URL:           getEnv("TARGET_URL", "https://en.wikipedia.org/wiki/List_of_countries_by_population_(United_Nations)"),

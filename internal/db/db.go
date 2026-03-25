@@ -1,4 +1,4 @@
-// Package db manages the MySQL connection and provides idempotent batch inserts.
+// Package db manages the database connection and provides idempotent batch inserts.
 package db
 
 import (
@@ -11,13 +11,16 @@ import (
 	"sync"
 
 	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/lib/pq"
 
 	"html-kafka-pipeline/internal/models"
+	"html-kafka-pipeline/internal/schema"
 )
 
 // DB wraps a *sql.DB with table-creation tracking.
 type DB struct {
 	conn          *sql.DB
+	dialect       schema.Dialect
 	mu            sync.Mutex
 	createdTables map[string]struct{}
 }
@@ -33,69 +36,88 @@ func New(driver, dsn string) (*DB, error) {
 	if err := conn.Ping(); err != nil {
 		return nil, fmt.Errorf("ping db: %w", err)
 	}
+	d := schema.DialectMySQL
+	if driver == "postgres" {
+		d = schema.DialectPostgres
+	}
 	log.Printf("[db] connected to %s", driver)
-	return &DB{conn: conn, createdTables: make(map[string]struct{})}, nil
+	return &DB{conn: conn, dialect: d, createdTables: make(map[string]struct{})}, nil
 }
 
 // EnsureTable creates the target table if it does not yet exist.
 // The table includes _id (PK) and _row_hash (UNIQUE) for idempotency.
 // It is safe to call concurrently.
-func (d *DB) EnsureTable(schema models.SchemaInfo) error {
+func (d *DB) EnsureTable(si models.SchemaInfo) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if _, ok := d.createdTables[schema.TableName]; ok {
+	if _, ok := d.createdTables[si.TableName]; ok {
 		return nil
 	}
 
-	parts := []string{
-		"`_id` BIGINT AUTO_INCREMENT PRIMARY KEY",
-		"`_row_hash` VARCHAR(64) NOT NULL UNIQUE",
+	// Build a schema.Schema from the SchemaInfo so we can use CreateTableSQL.
+	sc := &schema.Schema{TableName: si.TableName}
+	for _, col := range si.Columns {
+		sc.Columns = append(sc.Columns, schema.Column{
+			Name: col.Name,
+			Type: schema.ColumnType(col.Type),
+		})
 	}
-	for _, col := range schema.Columns {
-		parts = append(parts, fmt.Sprintf("`%s` %s", col.Name, col.Type))
-	}
-
-	ddl := fmt.Sprintf(
-		"CREATE TABLE IF NOT EXISTS `%s` (\n  %s\n)",
-		schema.TableName,
-		strings.Join(parts, ",\n  "),
-	)
+	ddl := sc.CreateTableSQL(d.dialect)
 
 	if _, err := d.conn.Exec(ddl); err != nil {
-		return fmt.Errorf("create table %q: %w", schema.TableName, err)
+		return fmt.Errorf("create table %q: %w", si.TableName, err)
 	}
 
-	d.createdTables[schema.TableName] = struct{}{}
-	log.Printf("[db] table %q ready", schema.TableName)
+	d.createdTables[si.TableName] = struct{}{}
+	log.Printf("[db] table %q ready", si.TableName)
 	return nil
 }
 
 // BatchInsert inserts records into tableName inside a single transaction.
-// It uses INSERT IGNORE so duplicate rows (same _row_hash) are silently skipped,
-// providing at-least-once delivery with idempotent writes.
+// For MySQL it uses INSERT IGNORE; for Postgres it uses ON CONFLICT DO NOTHING.
+// Both strategies skip duplicate rows (same _row_hash), providing idempotent writes.
 // Returns the number of rows actually inserted.
 func (d *DB) BatchInsert(tableName string, columns []models.ColumnInfo, records []map[string]string) (int, error) {
 	if len(records) == 0 {
 		return 0, nil
 	}
 
+	q := d.dialect.QuoteIdent
+
 	colNames := make([]string, len(columns))
 	for i, c := range columns {
-		colNames[i] = "`" + c.Name + "`"
+		colNames[i] = q(c.Name)
 	}
 
-	// INSERT IGNORE silently discards rows that violate the UNIQUE constraint on _row_hash.
 	placeholders := make([]string, len(columns)+1) // +1 for _row_hash
 	for i := range placeholders {
-		placeholders[i] = "?"
+		if d.dialect == schema.DialectPostgres {
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+		} else {
+			placeholders[i] = "?"
+		}
 	}
-	query := fmt.Sprintf(
-		"INSERT IGNORE INTO `%s` (`_row_hash`, %s) VALUES (%s)",
-		tableName,
-		strings.Join(colNames, ", "),
-		strings.Join(placeholders, ", "),
-	)
+
+	var query string
+	if d.dialect == schema.DialectPostgres {
+		query = fmt.Sprintf(
+			"INSERT INTO %s (%s, %s) VALUES (%s) ON CONFLICT (%s) DO NOTHING",
+			q(tableName),
+			q("_row_hash"),
+			strings.Join(colNames, ", "),
+			strings.Join(placeholders, ", "),
+			q("_row_hash"),
+		)
+	} else {
+		query = fmt.Sprintf(
+			"INSERT IGNORE INTO %s (%s, %s) VALUES (%s)",
+			q(tableName),
+			q("_row_hash"),
+			strings.Join(colNames, ", "),
+			strings.Join(placeholders, ", "),
+		)
+	}
 
 	tx, err := d.conn.Begin()
 	if err != nil {
